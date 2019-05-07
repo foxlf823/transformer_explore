@@ -270,6 +270,8 @@ class Transformer_classification(nn.Module):
         else:
             enc_output = self.input_projection(self.src_word_emb(src_seq)) + self.position_enc(src_pos)
 
+        # enc_output = self.src_word_emb(src_seq) + self.position_enc(src_pos)
+
         for enc_layer in self.layer_stack:
             enc_output, enc_slf_attn = enc_layer(
                 enc_output,

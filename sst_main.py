@@ -13,9 +13,11 @@ import torch.optim as optim
 import time
 from my_utils import pad_sequence, FoxTokenizer
 import nltk
+import codecs
+import os
+from collections import Counter
 
-
-def load_data_(dataset, len_max_seq, sentences):
+def load_data_(dataset, len_max_seq, sentences, low_tf):
     for labeled_tree_sentence in dataset:
         label, sentence = labeled_tree_sentence.to_labeled_lines()[0]
         logging.debug("{} | {}".format(sentence, label))
@@ -28,12 +30,14 @@ def load_data_(dataset, len_max_seq, sentences):
 
         if opt.uncased:
             tokens = [t.lower() for t in tokens]
+
+        tokens = [t for t in tokens if t not in low_tf]
         sentence = {}
         sentence['label'] = label
         sentence['token'] = tokens
         sentences.append(sentence)
 
-def load_data(directory, len_max_seq):
+def load_data(directory, len_max_seq, low_tf):
 
     dataset = pytreebank.load_sst(directory)
 
@@ -41,9 +45,84 @@ def load_data(directory, len_max_seq):
     dev_sentences = []
     test_sentence = []
 
-    load_data_(dataset['train'], len_max_seq, train_sentences)
-    load_data_(dataset['dev'], len_max_seq, dev_sentences)
-    load_data_(dataset['test'], len_max_seq, test_sentence)
+    load_data_(dataset['train'], len_max_seq, train_sentences, low_tf)
+    load_data_(dataset['dev'], len_max_seq, dev_sentences, low_tf)
+    load_data_(dataset['test'], len_max_seq, test_sentence, low_tf)
+
+    return train_sentences, dev_sentences, test_sentence
+
+def compute_tf(directory, len_max_seq, tf):
+    dataset = pytreebank.load_sst(directory)
+    count_frq = dict()
+
+    for labeled_tree_sentence in dataset['train']:
+        label, sentence = labeled_tree_sentence.to_labeled_lines()[0]
+        tokens = sentence.split()[:len_max_seq]
+
+        if opt.uncased:
+            tokens = [t.lower() for t in tokens]
+
+        for one in tokens:
+            if one in count_frq:
+                count_frq[one] += 1
+            else:
+                count_frq[one] = 1
+
+    for labeled_tree_sentence in dataset['dev']:
+        label, sentence = labeled_tree_sentence.to_labeled_lines()[0]
+        tokens = sentence.split()[:len_max_seq]
+
+        if opt.uncased:
+            tokens = [t.lower() for t in tokens]
+
+        for one in tokens:
+            if one in count_frq:
+                count_frq[one] += 1
+            else:
+                count_frq[one] = 1
+
+    for labeled_tree_sentence in dataset['test']:
+        label, sentence = labeled_tree_sentence.to_labeled_lines()[0]
+        tokens = sentence.split()[:len_max_seq]
+
+        if opt.uncased:
+            tokens = [t.lower() for t in tokens]
+
+        for one in tokens:
+            if one in count_frq:
+                count_frq[one] += 1
+            else:
+                count_frq[one] = 1
+
+    low_frequency_words = set([k for (k, v) in count_frq.items() if v <= tf])
+
+    return low_frequency_words
+
+
+def load_data_lei_(path, len_max_seq, sentences):
+    with codecs.open(path, "r", "UTF-8") as fp:
+        for line in fp:
+            line = line.strip()
+            if line == u'':
+                continue
+
+            tokens = line.split()
+
+            sentence = {}
+            sentence['label'] = int(tokens[0])
+            sentence['token'] = tokens[1:][:len_max_seq]
+            sentences.append(sentence)
+
+
+def load_data_lei(directory, len_max_seq):
+
+    train_sentences = []
+    dev_sentences = []
+    test_sentence = []
+
+    load_data_lei_(os.path.join(directory, "stsa.fine.train"), len_max_seq, train_sentences)
+    load_data_lei_(os.path.join(directory, "stsa.fine.dev"), len_max_seq, dev_sentences)
+    load_data_lei_(os.path.join(directory, "stsa.fine.test"), len_max_seq, test_sentence)
 
     return train_sentences, dev_sentences, test_sentence
 
@@ -122,6 +201,7 @@ def evaluate(data_loader, model):
     return 100.0 * correct / total
 
 
+
 if __name__ == "__main__":
 
     import argparse
@@ -149,6 +229,7 @@ if __name__ == "__main__":
     parser.add_argument('-tokenize', type=str, default='no', help='no, nltk, my')
     parser.add_argument('-char_emb', type=str, default=None)
     parser.add_argument('-char_emb_dim', type=int, default=50)
+    parser.add_argument('-tf', type=int, default=0, help='the word emerging lower than this will be removed')
 
     opt = parser.parse_args()
 
@@ -166,7 +247,10 @@ if __name__ == "__main__":
         torch.manual_seed(opt.random_seed)
         torch.cuda.manual_seed_all(opt.random_seed)
 
-    train_sentences, dev_sentences, test_sentences = load_data(opt.data, opt.len_max_seq)
+    low_tf = compute_tf(opt.data, opt.len_max_seq, opt.tf)
+
+    train_sentences, dev_sentences, test_sentences = load_data(opt.data, opt.len_max_seq, low_tf)
+    # train_sentences, dev_sentences, test_sentences = load_data_lei(opt.data, opt.len_max_seq)
     logging.info("training sentences {}".format(len(train_sentences)))
     logging.info("dev sentences {}".format(len(dev_sentences)))
     logging.info("test sentences {}".format(len(test_sentences)))
@@ -188,6 +272,8 @@ if __name__ == "__main__":
     word_embedding, real_word_emb_dim = initialize_emb(opt.word_emb, alphabet_token, opt.word_emb_dim)
     if opt.char_emb is not None :
         char_embedding, real_char_emb_dim = initialize_emb(opt.char_emb, alphabet_token, opt.char_emb_dim)
+    else:
+        real_char_emb_dim = None
 
     logging.info("create model")
 

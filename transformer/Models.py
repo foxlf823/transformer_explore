@@ -56,7 +56,7 @@ class Encoder(nn.Module):
 
     def __init__(
             self,
-            n_src_vocab, len_max_seq, d_word_vec,
+            n_src_vocab, len_max_seq, use_char, d_word_vec, d_char_vec,
             n_layers, n_head, d_k, d_v,
             d_model, d_inner, dropout=0.1):
 
@@ -67,7 +67,13 @@ class Encoder(nn.Module):
         self.src_word_emb = nn.Embedding(
             n_src_vocab, d_word_vec, padding_idx=Constants.PAD)
 
-        self.input_projection = nn.Linear(d_word_vec, d_model, bias=False)
+        self.use_char = use_char
+        if self.use_char:
+            self.src_char_emb = nn.Embedding(
+                n_src_vocab, d_char_vec, padding_idx=Constants.PAD)
+            self.input_projection = nn.Linear(d_word_vec+d_char_vec, d_model, bias=False)
+        else:
+            self.input_projection = nn.Linear(d_word_vec, d_model, bias=False)
 
         self.position_enc = nn.Embedding.from_pretrained(
             get_sinusoid_encoding_table(n_position, d_model, padding_idx=0),
@@ -86,7 +92,10 @@ class Encoder(nn.Module):
         non_pad_mask = get_non_pad_mask(src_seq)
 
         # -- Forward
-        enc_output = self.input_projection(self.src_word_emb(src_seq)) + self.position_enc(src_pos)
+        if self.use_char:
+            enc_output = self.input_projection(torch.cat((self.src_word_emb(src_seq), self.src_char_emb(src_seq)), 2)) + self.position_enc(src_pos)
+        else:
+            enc_output = self.input_projection(self.src_word_emb(src_seq)) + self.position_enc(src_pos)
 
         for enc_layer in self.layer_stack:
             enc_output, enc_slf_attn = enc_layer(
@@ -214,17 +223,32 @@ from my_utils import freeze_net
 class Transformer_classification(nn.Module):
 
     def __init__(
-            self, n_src_vocab, len_max_seq, n_output,
-            d_word_vec=512, d_model=512, d_inner=2048,
+            self, n_src_vocab, len_max_seq, n_output, use_char,
+            d_word_vec=512, d_char_vec=100, d_model=512, d_inner=2048,
             n_layers=6, n_head=8, d_k=64, d_v=64, dropout=0.1):
 
         super().__init__()
 
-        self.encoder = Encoder(
-            n_src_vocab=n_src_vocab, len_max_seq=len_max_seq,
-            d_word_vec=d_word_vec, d_model=d_model, d_inner=d_inner,
-            n_layers=n_layers, n_head=n_head, d_k=d_k, d_v=d_v,
-            dropout=dropout)
+        n_position = len_max_seq + 1
+
+        self.src_word_emb = nn.Embedding(
+            n_src_vocab, d_word_vec, padding_idx=Constants.PAD)
+
+        self.use_char = use_char
+        if self.use_char:
+            self.src_char_emb = nn.Embedding(
+                n_src_vocab, d_char_vec, padding_idx=Constants.PAD)
+            self.input_projection = nn.Linear(d_word_vec + d_char_vec, d_model, bias=False)
+        else:
+            self.input_projection = nn.Linear(d_word_vec, d_model, bias=False)
+
+        self.position_enc = nn.Embedding.from_pretrained(
+            get_sinusoid_encoding_table(n_position, d_model, padding_idx=0),
+            freeze=True)
+
+        self.layer_stack = nn.ModuleList([
+            EncoderLayer(d_model, d_inner, n_head, d_k, d_v, dropout=dropout)
+            for _ in range(n_layers)])
 
         self.output_layer = nn.Linear(d_model, n_output, bias=False)
 
@@ -233,7 +257,27 @@ class Transformer_classification(nn.Module):
 
     def forward(self, src_seq, src_pos):
 
-        enc_output, *_ = self.encoder(src_seq, src_pos)
+        enc_slf_attn_list = []
+
+        # -- Prepare masks
+        slf_attn_mask = get_attn_key_pad_mask(seq_k=src_seq, seq_q=src_seq)
+        non_pad_mask = get_non_pad_mask(src_seq)
+
+        # -- Forward
+        if self.use_char:
+            enc_output = self.input_projection(
+                torch.cat((self.src_word_emb(src_seq), self.src_char_emb(src_seq)), 2)) + self.position_enc(src_pos)
+        else:
+            enc_output = self.input_projection(self.src_word_emb(src_seq)) + self.position_enc(src_pos)
+
+        for enc_layer in self.layer_stack:
+            enc_output, enc_slf_attn = enc_layer(
+                enc_output,
+                non_pad_mask=non_pad_mask,
+                slf_attn_mask=slf_attn_mask)
+
+            enc_slf_attn_list += [enc_slf_attn]
+
 
         batch_size, max_len, _ = enc_output.size()
         pooled_enc_output = nn.functional.max_pool2d(enc_output.unsqueeze(1), (max_len, 1)).view(batch_size, -1)
@@ -251,8 +295,12 @@ class Transformer_classification(nn.Module):
 
         return loss, total, correct
 
-    def init_emb(self, word_embedding):
-        self.encoder.src_word_emb.weight.data.copy_(word_embedding)
+    def init_emb(self, word_embedding, char_embedding):
+        self.src_word_emb.weight.data.copy_(word_embedding)
+        if self.use_char:
+            self.src_char_emb.weight.data.copy_(char_embedding)
 
     def free_emb(self):
-        freeze_net(self.encoder.src_word_emb)
+        freeze_net(self.src_word_emb)
+        if self.use_char:
+            freeze_net(self.src_char_emb)

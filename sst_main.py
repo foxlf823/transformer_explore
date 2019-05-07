@@ -11,7 +11,27 @@ from transformer.Models import Transformer_classification
 from torch.utils.data import DataLoader, Dataset
 import torch.optim as optim
 import time
-from my_utils import pad_sequence
+from my_utils import pad_sequence, FoxTokenizer
+import nltk
+
+
+def load_data_(dataset, len_max_seq, sentences):
+    for labeled_tree_sentence in dataset:
+        label, sentence = labeled_tree_sentence.to_labeled_lines()[0]
+        logging.debug("{} | {}".format(sentence, label))
+        if opt.tokenize == 'nltk':
+            tokens = nltk.word_tokenize(sentence)[:len_max_seq]
+        elif opt.tokenize == 'my':
+            tokens = FoxTokenizer.tokenize(0, sentence, True)[:len_max_seq]
+        else:
+            tokens = sentence.split()[:len_max_seq]
+
+        if opt.uncased:
+            tokens = [t.lower() for t in tokens]
+        sentence = {}
+        sentence['label'] = label
+        sentence['token'] = tokens
+        sentences.append(sentence)
 
 def load_data(directory, len_max_seq):
 
@@ -21,33 +41,9 @@ def load_data(directory, len_max_seq):
     dev_sentences = []
     test_sentence = []
 
-    for labeled_tree_sentence in dataset['train']:
-        label, sentence = labeled_tree_sentence.to_labeled_lines()[0]
-        logging.debug("{} | {}".format(sentence, label))
-        tokens = sentence.split()[:len_max_seq]
-        sentence = {}
-        sentence['label'] = label
-        sentence['token'] = tokens
-        train_sentences.append(sentence)
-
-
-    for labeled_tree_sentence in dataset['dev']:
-        label, sentence = labeled_tree_sentence.to_labeled_lines()[0]
-        logging.debug("{} | {}".format(sentence, label))
-        tokens = sentence.split()[:len_max_seq]
-        sentence = {}
-        sentence['label'] = label
-        sentence['token'] = tokens
-        dev_sentences.append(sentence)
-
-    for labeled_tree_sentence in dataset['test']:
-        label, sentence = labeled_tree_sentence.to_labeled_lines()[0]
-        logging.debug("{} | {}".format(sentence, label))
-        tokens = sentence.split()[:len_max_seq]
-        sentence = {}
-        sentence['label'] = label
-        sentence['token'] = tokens
-        test_sentence.append(sentence)
+    load_data_(dataset['train'], len_max_seq, train_sentences)
+    load_data_(dataset['dev'], len_max_seq, dev_sentences)
+    load_data_(dataset['test'], len_max_seq, test_sentence)
 
     return train_sentences, dev_sentences, test_sentence
 
@@ -149,6 +145,10 @@ if __name__ == "__main__":
     parser.add_argument('-iter', type=int, default=100)
     parser.add_argument('-gpu', type=int, default=-1)
     parser.add_argument('-patience', type=int, default=20)
+    parser.add_argument('-uncased', action='store_true', default=False)
+    parser.add_argument('-tokenize', type=str, default='no', help='no, nltk, my')
+    parser.add_argument('-char_emb', type=str, default=None)
+    parser.add_argument('-char_emb_dim', type=int, default=50)
 
     opt = parser.parse_args()
 
@@ -185,16 +185,28 @@ if __name__ == "__main__":
     prepare_instance(test_sentences, alphabet_token, alphabet_label)
 
     logging.info("prepare embedding")
-    word_embedding, real_emb_dim = initialize_emb(opt.word_emb, alphabet_token, opt.word_emb_dim)
+    word_embedding, real_word_emb_dim = initialize_emb(opt.word_emb, alphabet_token, opt.word_emb_dim)
+    if opt.char_emb is not None :
+        char_embedding, real_char_emb_dim = initialize_emb(opt.char_emb, alphabet_token, opt.char_emb_dim)
 
     logging.info("create model")
-    model = Transformer_classification(alphabet_token.size(), opt.len_max_seq, alphabet_label.size(),
-            d_word_vec=real_emb_dim, d_model=opt.hidden_dim, d_inner=4*opt.hidden_dim,
+
+    if opt.gpu >= 0 and torch.cuda.is_available():
+        device = torch.device("cuda", opt.gpu)
+    else:
+        device = torch.device("cpu")
+    logging.info("use device {}".format(device))
+
+    model = Transformer_classification(alphabet_token.size(), opt.len_max_seq, alphabet_label.size(), opt.char_emb is not None,
+            d_word_vec=real_word_emb_dim, d_char_vec=real_char_emb_dim, d_model=opt.hidden_dim, d_inner=4*opt.hidden_dim,
             n_layers=opt.hidden_layer, n_head=opt.head_num, d_k=opt.hidden_dim//opt.head_num,
                                        d_v=opt.hidden_dim//opt.head_num, dropout=opt.dropout)
 
-    model.init_emb(word_embedding)
-
+    if opt.char_emb is not None:
+        model.init_emb(word_embedding, char_embedding)
+    else:
+        model.init_emb(word_embedding, None)
+    model.to(device)
 
     logging.info("prepare training")
     optimizer = optim.Adam(model.parameters(), lr=opt.lr, weight_decay=opt.l2)

@@ -175,3 +175,109 @@ def initialize_emb(path, alphabet, expected_emb_dim):
         embedding_size = expected_emb_dim
 
     return word_embedding, embedding_size
+
+def word_to_1234gram(word):
+    gram1234 = []
+    word_ = ["#BEGIN#"]
+    for c in word:
+        gram1234.append(c)
+        word_.append(c)
+
+    word_.append("#END#")
+
+    for i in range(0, len(word_)-1):
+        gram1234.append(''.join(word_[i:i+2]))
+
+    for i in range(0, len(word_)-2):
+        gram1234.append(''.join(word_[i:i+3]))
+
+    for i in range(0, len(word_)-3):
+        gram1234.append(''.join(word_[i:i+4]))
+
+    return gram1234
+
+import pytreebank
+from alphabet import Alphabet
+def generate_char_emb(dataset, input_path, output_path):
+
+    # step 1, read JMT pre-trained char embedding
+    embedd_dim = -1
+    embedd_dict = dict()
+
+
+    with codecs.open(input_path, 'r', 'UTF-8') as file:
+        for line in file:
+            line = line.strip()
+            if len(line) == 0:
+                continue
+
+            tokens = re.split(r"\s+", line)
+
+            if len(tokens) == 2:
+                continue # it's a head
+            if embedd_dim < 0:
+                embedd_dim = len(tokens) - 1
+            else:
+                # assert (embedd_dim + 1 == len(tokens))
+                if embedd_dim + 1 != len(tokens):
+                    continue
+            embedd = np.zeros([embedd_dim])
+            embedd[:] = tokens[1:]
+
+            # remove prefix "1gram-", "2gram-", "3gram-", "4gram-"
+            embedd_dict[tokens[0][tokens[0].find('-')+1:]] = embedd
+
+    # step 2, read all words from dataset
+    dataset = pytreebank.load_sst(dataset)
+    alphabet_token = Alphabet('token')
+    for labeled_tree_sentence in dataset['train']:
+        label, sentence = labeled_tree_sentence.to_labeled_lines()[0]
+        tokens = sentence.split()
+        for token in tokens:
+            alphabet_token.add(token)
+
+    for labeled_tree_sentence in dataset['dev']:
+        label, sentence = labeled_tree_sentence.to_labeled_lines()[0]
+        tokens = sentence.split()
+        for token in tokens:
+            alphabet_token.add(token)
+
+    for labeled_tree_sentence in dataset['test']:
+        label, sentence = labeled_tree_sentence.to_labeled_lines()[0]
+        tokens = sentence.split()
+        for token in tokens:
+            alphabet_token.add(token)
+
+    # step 3, iter alphabet, map each word into 1,2,3,4gram, find them in embedd_dict, average the embeddings
+    word_embedd_dict = {}
+    for word, _ in alphabet_token.iteritems():
+        gram1234 = word_to_1234gram(word)
+        avg_count = 0
+        avg_embedd = np.zeros([embedd_dim])
+
+        for gram in gram1234:
+            if gram in embedd_dict:
+                vector = embedd_dict[gram]
+                avg_embedd += vector
+                avg_count += 1
+
+        if avg_count > 0:
+            avg_embedd = avg_embedd/avg_count
+            word_embedd_dict[word] = avg_embedd
+
+    # step 4, dump into word2vec format
+    with codecs.open(output_path, 'w', "UTF-8") as fp:
+        for word, vector in word_embedd_dict.items():
+            str_rep = word
+            for element in vector.flat:
+                str_rep = str_rep+" "+str(np.float32(element))
+
+            fp.write(str_rep+"\n")
+
+
+
+
+if __name__ == "__main__":
+    generate_char_emb('/Users/feili/dataset/sst/trees', '/Users/feili/Downloads/jmt_pre-trained_embeddings/charNgram.txt',
+                      '/Users/feili/Downloads/jmt_pre-trained_embeddings/jmt_word_emb.txt')
+
